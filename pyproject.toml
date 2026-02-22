@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "endo-da3"
+version = "0.1.0"
+description = "DA3 depth model with a swappable DINOv2 backbone for endoscopy"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "torchvision",
+    "einops",
+    "addict",
+    "huggingface_hub",
+    "safetensors",
+    "numpy",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["endo_da3*"]

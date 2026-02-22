@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual envs / conda
+.venv/
+env/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# PyTorch / model artefacts
+*.pth
+*.pt
+*.safetensors
+*.ckpt
+
+# HuggingFace cache (if accidentally placed here)
+.cache/
+
+# Output images and plots from test scripts
+*.png
+*.jpg
+*.jpeg
+
+# IDE
+.vscode/
+.idea/
+pyrightconfig.json
+
+# OS
+.DS_Store
+Thumbs.db

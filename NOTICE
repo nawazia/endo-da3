@@ -1,0 +1,34 @@
+endo-da3
+========
+
+This project incorporates components from Depth Anything 3 (DA3),
+used and distributed under the Apache License, Version 2.0.
+
+--------------------------------------------------------------------
+Depth Anything 3
+Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+https://github.com/DepthAnything/Depth-Anything-3
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+The following files in endo_da3/_vendor/ are sourced from DA3
+with only import-path modifications to work as a self-contained package:
+
+  dinov2/vision_transformer.py
+  dinov2/dinov2.py
+  dinov2/layers/
+  reference_view_selector.py
+  dpt.py
+  dualdpt.py
+  cam_dec.py
+  cam_enc.py
+  geometry.py          (subset of utils/geometry.py)
+  utils/head_utils.py
+  utils/attention.py
+  utils/block.py
+  utils/transform.py
+--------------------------------------------------------------------
