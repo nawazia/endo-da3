@@ -27,6 +27,9 @@ venv/
 # HuggingFace cache (if accidentally placed here)
 .cache/
 
+# Training outputs (checkpoints, TensorBoard logs, depth visualisations)
+runs/
+
 # Output images and plots from test scripts
 *.png
 *.jpg

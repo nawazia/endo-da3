@@ -167,7 +167,6 @@ class EndoDA3(nn.Module):
     # Forward
     # ------------------------------------------------------------------
 
-    @torch.no_grad()
     def forward(
         self,
         x: torch.Tensor,

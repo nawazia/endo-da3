@@ -2,7 +2,7 @@
 
 **Endo-DA3** adapts [Depth Anything 3 (DA3)](https://github.com/DepthAnything/Depth-Anything-3) for endoscopic depth estimation by replacing the DA3 backbone with [GastroNet](https://github.com/...)'s DINOv2, which was pretrained on gastrointestinal imagery.
 
-The result is a full multi-view depth model — backbone, DualDPT head, and camera decoder — ready to fine-tune on endoscopy data.
+The result is a full multi-view depth model, backbone, DualDPT head, and camera decoder, ready to fine-tune on endoscopy data.
 
 ## Architecture
 
@@ -17,6 +17,7 @@ EndoDA3
 ```
 
 **Input**: `(B, S, 3, H, W)` — batch of S-view image sequences
+
 **Output**: `depth`, `depth_conf`, `ray`, `ray_conf`, and optionally `extrinsics`, `intrinsics`
 
 ## Setup
@@ -76,7 +77,7 @@ python tests/test_da3_dino.py
 
 | Stage | What is Trainable? | Primary Data | Purpose |
 |---|---|---|---|
-| 1. Align | Decoder Only | Synthetic (SimCol3D, C3VD, EndoSLAM [synth], PolypSense3D) | Map Features → Geometry |
+| 1. Align | Decoder Only | Synthetic (SimCol3D, C3VD, EndoSLAM [synth], PolypSense3D [clinical]) | Map Features → Geometry |
 | 2. Steer (Distillation) | Decoder + LoRA | Unlabeled Real (HyperKvasir, EndoSLAM [real]) | Fix Texture/Lighting Artifacts |
 | 3. Calibrate | Decoder Only | Labeled Real (SCARED, Hamlyn, StereoMIS, SERV-CT) | Final Metric Precision |
 
