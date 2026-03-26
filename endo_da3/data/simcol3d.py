@@ -213,7 +213,8 @@ class SimCol3DDataset(EndoDepthDataset):
         }
 
         if self.with_pose and poses is not None:
-            c2w = np.stack([poses[fi] for fi in frame_idxs])  # (S, 4, 4)
+            c2w = np.stack([poses[fi] for fi in frame_idxs])        # (S, 4, 4) absolute
+            c2w = np.linalg.inv(c2w[0]) @ c2w                       # relative: c2w[0] = I
             out["c2w"] = torch.from_numpy(c2w).float()
 
         return out

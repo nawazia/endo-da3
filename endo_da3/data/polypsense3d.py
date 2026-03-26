@@ -110,9 +110,14 @@ def _relative_c2w(c2w_abs: np.ndarray) -> np.ndarray:
 
 
 def _load_depth(path: Path) -> np.ndarray:
-    """Return (H, W) float32 depth in metres (R / 1000); invalid pixels = 0."""
+    """Return (H, W) float32 depth in metres.
+
+    Unity renders depth with reversed convention: large R = close, small R = far.
+    Corrected depth = (255 - R) / 1000, clamped ≥ 0.
+    """
     arr = np.array(Image.open(path))          # RGBA uint8
-    return arr[..., 0].astype(np.float32) * _DEPTH_SCALE
+    R = arr[..., 0].astype(np.float32)
+    return np.maximum(0.0, 255.0 - R) * _DEPTH_SCALE
 
 
 def _img_transform(img_size: int):

@@ -22,7 +22,7 @@ DEVICE    = "cuda" if torch.cuda.is_available() else "cpu"
 _DEPTH_RANGES = {
     "SimCol3DDataset":           (0.0,  0.21),   # 0–20 cm
     "C3VDDataset":               (0.0,  0.11),   # 0–100 mm
-    "EndoSLAMSynthDataset":      (0.0,  0.65),   # 0–63 cm (Colon max)
+    "EndoSLAMSynthDataset":      (0.0,  0.70),   # 0–70 cm (Stomach far clip)
     "PolypSense3DVirtualDataset":(0.0,  0.26),   # 0–255 mm
 }
 
@@ -36,8 +36,8 @@ def test_datasets():
 
     # relative_pose: datasets that normalise c2w to first frame (c2w[0] = I)
     configs = [
-        (SimCol3DDataset,            DATA / "SimCol3D",     False),
-        (C3VDDataset,                DATA / "C3VD",         False),
+        (SimCol3DDataset,            DATA / "SimCol3D",     True),
+        (C3VDDataset,                DATA / "C3VD",         True),
         (EndoSLAMSynthDataset,       DATA / "EndoSLAM",     True),
         (PolypSense3DVirtualDataset, DATA / "PolypSense3D", True),
     ]
@@ -145,6 +145,13 @@ def test_train_step():
     print(f"\n  loss : {loss.item():.4f}")
     for k, v in terms.items():
         print(f"    {k}: {v:.4f}")
+
+    # Confidence-free depth L1 (the metric used for best-checkpoint selection)
+    mask      = (depths > 0).float()
+    depth_l1  = ((out["depth"] - depths).abs() * mask).sum() / mask.sum().clamp(min=1)
+    print(f"\n  depth_l1 (conf-free): {depth_l1.item():.4f} m")
+    assert depth_l1.item() > 0,   "depth_l1 should be positive"
+    assert depth_l1.item() < 10,  "depth_l1 unreasonably large (>10 m)"
 
     loss.backward()
     print("  [PASS]\n")

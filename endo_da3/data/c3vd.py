@@ -239,7 +239,8 @@ class C3VDDataset(EndoDepthDataset):
             images.append(self._tf(Image.open(rgb_path).convert("RGB")))
             depths.append(_load_depth(depth_path, self.img_size))
 
-        c2w = np.stack([poses[fi] for fi in frame_idxs])   # (S, 4, 4)
+        c2w = np.stack([poses[fi] for fi in frame_idxs])        # (S, 4, 4) absolute
+        c2w = np.linalg.inv(c2w[0]) @ c2w                       # relative: c2w[0] = I
 
         return {
             "images": torch.stack(images),                      # (S, 3, H, W)

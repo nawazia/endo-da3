@@ -19,8 +19,10 @@ Layout after extraction (root = /path/to/EndoSLAM):
         Stomach/           (same layout, stomach_position_rotation.csv)
 
 Depth encoding:
-    depth_metres = R_channel / 100.0
-    Range: ~1–63 cm (Colon), ~1–70 cm (Stomach), ~1–50 cm (Small Intestine)
+    R channel encodes distance-from-far-plane in cm (Unity: bright=near, dark=far).
+    Large R = close tissue, small R = far tissue. R spans ~1–70 (NOT normalised to 255).
+    depth_metres = far_clip - R/100   (far_clip: Colon 0.63m, Intestine 0.50m, Stomach 0.70m)
+    Range: 0–63 cm (Colon), 0–70 cm (Stomach), 0–50 cm (Small Intestine)
 
 Pose convention:
     CSV columns: tX, tY, tZ (camera position, Unity metres), rX, rY, rZ, rW (quaternion x,y,z,w)
@@ -56,8 +58,16 @@ from endo_da3.data.base import EndoDepthDataset
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-_ORIG_SIZE    = 320                  # native image resolution (square)
-_DEPTH_SCALE  = 1.0 / 100.0         # R channel (cm) → metres
+_ORIG_SIZE   = 320                   # native image resolution (square)
+
+# Per-scene far-clip distances in metres (= max possible depth value).
+# R encodes distance-from-far-plane in cm (Unity: bright=near, dark=far).
+# depth_metres = far_clip - R/100  →  large R = close, small R = far.
+_SCENE_FAR_CLIP = {
+    "Colon":           0.63,
+    "Small Intestine": 0.50,
+    "Stomach":         0.70,
+}
 
 # Unity left-handed → OpenCV right-handed: flip Y axis
 _TM = np.array([[1,  0, 0, 0],
@@ -131,10 +141,16 @@ def _relative_c2w(c2w_abs: np.ndarray) -> np.ndarray:
     return np.einsum("ij,sjk->sik", c2w_ref_inv, c2w_abs)
 
 
-def _load_depth(path: Path) -> np.ndarray:
-    """Return (H, W) float32 depth in metres (R channel / 100)."""
+def _load_depth(path: Path, scene_far_clip: float) -> np.ndarray:
+    """Return (H, W) float32 depth in metres.
+
+    R encodes distance-from-far-plane in cm (Unity: bright=near, dark=far).
+    Large R = close tissue, small R = far tissue.
+    depth_metres = far_clip - R/100  (clamped ≥ 0)
+    """
     arr = np.array(Image.open(path))   # RGBA uint8
-    return (arr[..., 0].astype(np.float32)) * _DEPTH_SCALE
+    R = arr[..., 0].astype(np.float32)
+    return np.maximum(0.0, scene_far_clip - R / 100.0)
 
 
 def _img_transform(img_size: int):
@@ -184,7 +200,7 @@ class EndoSLAMSynthDataset(EndoDepthDataset):
         unity_dir = self.root / "UnityCam"
         K = _load_K(unity_dir / "Calibration" / "cam.txt", _ORIG_SIZE, img_size)
 
-        self._samples: list[tuple] = []   # (frames_dir, depths_dir, K, poses_or_None, [idxs])
+        self._samples: list[tuple] = []   # (frames_dir, depths_dir, K, poses_or_None, [idxs], scene_far_clip)
 
         for scene_name, pose_csv_name in _SCENES.items():
             scene_dir  = unity_dir / scene_name
@@ -219,15 +235,16 @@ class EndoSLAMSynthDataset(EndoDepthDataset):
 
             # Sliding windows within the split
             window = (seq_len - 1) * stride + 1
+            scene_far_clip = _SCENE_FAR_CLIP[scene_name]
             for start in range(len(valid_range) - window + 1):
                 idxs = [valid_range.start + start + j * stride for j in range(seq_len)]
-                self._samples.append((frames_dir, depths_dir, K, poses, idxs))
+                self._samples.append((frames_dir, depths_dir, K, poses, idxs, scene_far_clip))
 
     def __len__(self) -> int:
         return len(self._samples)
 
     def __getitem__(self, idx: int) -> dict:
-        frames_dir, depths_dir, K, poses, frame_idxs = self._samples[idx]
+        frames_dir, depths_dir, K, poses, frame_idxs, scene_far_clip = self._samples[idx]
 
         images, depths = [], []
         for fi in frame_idxs:
@@ -241,7 +258,7 @@ class EndoSLAMSynthDataset(EndoDepthDataset):
 
             images.append(self._tf(Image.open(rgb_path).convert("RGB")))
 
-            d_raw = torch.from_numpy(_load_depth(depth_path)).unsqueeze(0).unsqueeze(0)
+            d_raw = torch.from_numpy(_load_depth(depth_path, scene_far_clip)).unsqueeze(0).unsqueeze(0)
             d_res = F.interpolate(d_raw, size=(self.img_size, self.img_size),
                                   mode="bilinear", align_corners=False).squeeze()
             depths.append(d_res)

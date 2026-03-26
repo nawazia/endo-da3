@@ -4,6 +4,60 @@
 
 The result is a full multi-view depth model, backbone, DualDPT head, and camera decoder, ready to fine-tune on endoscopy data.
 
+## Training Pipeline
+
+| Stage | Frozen | Trainable | Data | Loss | Purpose |
+|---|---|---|---|---|---|
+| 1. Align | GastroNet backbone | DualDPT head, camera_token, q_norm/k_norm | SimCol3D, C3VD, EndoSLAM (synth), PolypSense3D | LD + LM + LP + Lgrad (GT poses) | Teach decoder to read GastroNet features |
+| 2a. Real-domain | GastroNet backbone base | LoRA adapters, DualDPT head | Hamlyn daVinci (stereo, RAFT pseudo-GT) | LD + Lgrad | Bridge synthetic→real domain gap |
+| 3. Calibrate | GastroNet backbone + LoRA | DualDPT head (low LR) | SCARED (structured-light GT) | LD + Lgrad | Anchor metric scale for clinical use |
+
+### Stage 1 — Align
+
+Trains the DualDPT head on 4 synthetic/simulated endoscopy datasets with ground-truth depth. GastroNet backbone is fully frozen; the decoder learns to decode GastroNet's feature maps into metric depth.
+
+```bash
+python -u train/stage1.py \
+    --data-path ~/code/data \
+    --gastronet /path/to/gastronet/dinov2.pth \
+    --out-dir runs/stage1 \
+    --batch-size 4 --epochs 30 2>&1 | tee runs/stage1/stage1.log
+```
+
+### Stage 2a — Real-domain alignment
+
+Injects LoRA adapters (rank-4) into backbone attention layers and fine-tunes on Hamlyn daVinci stereo video. Pseudo-GT depth is generated offline with RAFT-Stereo (`depth = fx·B / disparity = 2.103 / disparity`).
+
+```bash
+# Generate RAFT-Stereo pseudo-GT depth maps (run once)
+python tools/generate_hamlyn_pseudogt.py --split train --batch_size 32
+python tools/generate_hamlyn_pseudogt.py --split test  --batch_size 32
+
+# Train
+python -u train/stage2a.py \
+    --stage1-ckpt runs/stage1/best.pt \
+    --gastronet /path/to/gastronet/dinov2.pth \
+    --hamlyn-root ~/code/data/Hamlyn/daVinci \
+    --data-path ~/code/data \
+    --out-dir runs/stage2a \
+    --batch-size 5 --epochs 20 --lr 5e-5 2>&1 | tee runs/stage2a/stage2a.log
+```
+
+### Stage 3 — Calibrate *(planned)*
+
+Fine-tunes the decoder only on SCARED structured-light GT depth to recover metric scale.
+
+## Datasets
+
+| Dataset | Type | Depth | Used in |
+|---|---|---|---|
+| SimCol3D | Synthetic colonoscopy | Unity depth buffer (0–20cm) | Stage 1 |
+| C3VD | Synthetic colon (photorealistic) | Metric tiff (metres) | Stage 1 |
+| EndoSLAM | Unity simulation (colon/stomach/SI) | `far_clip − R/100` | Stage 1 |
+| PolypSense3D | Synthetic polyp scenes | `(255−R)/1000` m | Stage 1 |
+| Hamlyn daVinci | Real robotic surgery video (stereo) | RAFT-Stereo pseudo-GT | Stage 2a |
+| SCARED | Real colonoscopy (structured light) | Metric GT | Stage 3 |
+
 ## Architecture
 
 ```
@@ -29,35 +83,39 @@ pip install -e .
 
 Dependencies: `torch`, `torchvision`, `einops`, `addict`, `huggingface_hub`, `safetensors`
 
-You will also need the GastroNet checkpoint (`dinov2.pth`).
+You will also need the GastroNet checkpoint (`dinov2.pth`) — see [GastroNet access request](#gastronet-access).
 
 ## Usage
+
+### Prerequisites
+
+The GastroNet backbone is access-restricted. Request access via **[link TBD]**, then download `dinov2.pth`.
+
+The Endo-DA3 checkpoint distributed with this repo contains **only the trained head and LoRA adapter weights** — it does not include the GastroNet backbone, which must be provided separately.
+
+### Inference
 
 ```python
 from endo_da3 import EndoDA3
 import torch
 
-# Load DA3-BASE weights then swap backbone with GastroNet
-model = EndoDA3.from_pretrained(img_size=336, with_camera=True)
+model = EndoDA3.from_finetuned(
+    gastronet_path='path/to/gastronet/dinov2.pth',  # access-restricted, see above
+    weights_path='endo_da3_weights.pt',              # download from releases
+)
 
-ckpt = torch.load('path/to/gastronet/dinov2.pth', map_location='cpu')
-gastro_sd = {k.replace('backbone.', ''): v
-             for k, v in ckpt['teacher'].items()
-             if k.startswith('backbone.')}
-model.replace_backbone(gastro_sd)
-
-# Single-view
+# Single image
 x = torch.randn(1, 1, 3, 336, 336).cuda()
-out = model(x)
-# out['depth']:      (1, 1, 336, 336)
-# out['depth_conf']: (1, 1, 336, 336)
-# out['ray']:        (1, 1, 192, 192, 6)
-# out['extrinsics']: (1, 1, 3, 4)
-# out['intrinsics']: (1, 1, 3, 3)
+with torch.no_grad():
+    out = model(x)
+# out['depth']:      (1, 1, 336, 336)  metric depth in metres
+# out['depth_conf']: (1, 1, 336, 336)  per-pixel confidence
 
-# Multi-view (S=2)
+# Multi-view sequence (S=2)
 x = torch.randn(1, 2, 3, 336, 336).cuda()
-out = model(x)
+with torch.no_grad():
+    out = model(x)
+# out['ray']:        (1, 2, H/14, W/14, 6)  world-space ray map
 ```
 
 ## Tests
@@ -71,17 +129,21 @@ python tests/test_multiview.py
 
 # Backbone feature comparison (PCA)
 python tests/test_da3_dino.py
+
+# Hamlyn stereo reprojection test (verifies camera params)
+python tests/test_hamlyn_reprojection.py
 ```
 
 ## PLAN
 
 | Stage | What is Trainable? | Primary Data | Purpose |
 |---|---|---|---|
-| 1. Align | Decoder Only | Synthetic (SimCol3D, C3VD, EndoSLAM [synth], PolypSense3D [clinical]) | Map Features → Geometry |
-| 2. Steer (Distillation) | Decoder + LoRA | Unlabeled Real (HyperKvasir, EndoSLAM [real]) | Fix Texture/Lighting Artifacts |
-| 3. Calibrate | Decoder Only | Labeled Real (SCARED, Hamlyn, StereoMIS, SERV-CT) | Final Metric Precision |
+| 1. Align | Decoder Only | Synthetic (SimCol3D, C3VD, EndoSLAM [synth], PolypSense3D [Virtual]) | Map Features → Geometry |
+| 2a. Steer (Distillation) | Decoder + LoRA | Unlabeled Real (Hamlyn, StereoMIS) | Fix Texture/Lighting Artifacts |
+| 2b. Steer (Distillation) | Decoder + LoRA | Unlabeled Real (EndoMapper, EndoSLAM [Micro/PillCam], PolypSense3D [Clinical]) | Fix Texture/Lighting Artifacts |
+| 3. Calibrate | Decoder Only | Labeled Real (SCARED, EndoSLAM [High/LowCam] [Olympus],) | Final Metric Precision |
 
-eval on: SCARED-C, EndoAbS
+eval on: SCARED-C, EndoAbS, PolypSense3D (clinical)
 
 Stage 1: The "Translation" Phase (Alignment)
 Goal: Teach the Decoder to understand GastroNet's feature maps using perfect geometric data.
@@ -122,6 +184,19 @@ Stage 1 builds the geometric foundation (the "shape" of a tube).
 Stage 2 handles domain adaptation (the "look" of wet tissue).
 
 Stage 3 provides metric accuracy (the "distance" in mm).
+
+EndoSLAM
+  ┌──────────────────────────────────────┬──────────────────────────┬────────────┐
+  │                 Data                 │       Supervision        │   Stage    │
+  ├──────────────────────────────────────┼──────────────────────────┼────────────┤
+  │ UnityCam                             │ Pixelwise GT depth       │ Stage 1  ✓ │
+  ├──────────────────────────────────────┼──────────────────────────┼────────────┤
+  │ Hamlyn + StereoMIS P1                │ RAFT pseudo-GT (stereo)  │ Stage 2a ✓ │
+  ├──────────────────────────────────────┼──────────────────────────┼────────────┤
+  │ MiroCam + PillCam + other mono video │ Pose GT → photometric    │ Stage 2b   │
+  ├──────────────────────────────────────┼──────────────────────────┼────────────┤
+  │ HighCam + LowCam + OlympusCam        │ CT/mesh → rendered depth │ Stage 3    │
+  └──────────────────────────────────────┴──────────────────────────┴────────────┘
 
 ## Acknowledgements
 

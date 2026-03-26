@@ -91,16 +91,22 @@ def _to_colormap(depth: np.ndarray) -> np.ndarray:
     return (plt.get_cmap("magma_r")(norm)[..., :3] * 255).astype(np.uint8)
 
 
-def _save_depth_vis(vis_batch: tuple, path):
-    """Save pred depth vs GT depth for the first sample of the batch."""
-    images, gt_depths, pred_depths = vis_batch
-    # first item, first view: (3,H,W), (H,W), (H,W)
-    img   = images[0, 0].permute(1, 2, 0).numpy()
-    img   = ((img * _IMAGENET_STD + _IMAGENET_MEAN).clip(0, 1) * 255).astype(np.uint8)
-    gt    = _to_colormap(gt_depths[0, 0].numpy())
-    pred  = _to_colormap(pred_depths[0, 0].numpy())
+def _save_depth_vis_grid(rows: list, path):
+    """Save one row per dataset: [RGB | GT depth | Pred depth]."""
+    strips = []
+    for name, images, gt_depths, pred_depths in rows:
+        img  = images[0, 0].permute(1, 2, 0).numpy()
+        img  = ((img * _IMAGENET_STD + _IMAGENET_MEAN).clip(0, 1) * 255).astype(np.uint8)
+        gt   = _to_colormap(gt_depths[0, 0].numpy())
+        pred = _to_colormap(pred_depths[0, 0].numpy())
+        strip = np.concatenate([img, gt, pred], axis=1)  # (H, 3W, 3)
 
-    canvas = np.concatenate([img, gt, pred], axis=1)   # side by side
+        # Add dataset name label
+        label = np.zeros((20, strip.shape[1], 3), dtype=np.uint8)
+        strips.append(label)
+        strips.append(strip)
+
+    canvas = np.concatenate(strips, axis=0)
     PILImage.fromarray(canvas).save(path)
 
 
@@ -137,6 +143,14 @@ def train(args):
     )
     print(f"Datasets : {ds_names}")
     print(f"Train: {len(train_loader.dataset)} samples | Val: {len(val_loader.dataset)} samples")
+
+    # Compute which val batch index is the first of each dataset (ConcatDataset, no shuffle)
+    val_ds_sizes = [len(ds) for ds in val_loader.dataset.datasets]
+    _boundaries = [0]
+    for s in val_ds_sizes[:-1]:
+        _boundaries.append(_boundaries[-1] + s)
+    vis_batch_indices = {i // args.batch_size: name
+                         for i, name in zip(_boundaries, ds_names)}
 
     # ── optimiser ────────────────────────────────────────────────────────────
     opt = torch.optim.AdamW(
@@ -219,7 +233,8 @@ def train(args):
         # ── val ───────────────────────────────────────────────────────────
         model.eval()
         val_loss = 0.0
-        vis_batch = None
+        val_depth_l1 = 0.0      # confidence-free L1 depth — used for best ckpt
+        vis_batches = {}        # ds_name → (images, gt_depths, pred_depths)
         with torch.no_grad():
             for i, batch in enumerate(tqdm(val_loader, desc=f"val epoch {epoch}", leave=False)):
                 images = batch["images"].to(device)
@@ -229,16 +244,29 @@ def train(args):
                 out    = model(images)
                 loss, _ = da3_loss(out, depths, c2w, K, alpha=args.alpha)
                 val_loss += loss.item()
-                if i == 0:
-                    vis_batch = (images.cpu(), depths.cpu(), out["depth"].cpu())
 
-        val_loss /= len(val_loader)
-        writer.add_scalar("val/loss", val_loss, epoch)
-        print(f"Epoch {epoch:3d} — val_loss {val_loss:.4f}  [{time.time()-t0:.0f}s]")
+                # Raw L1 depth (no confidence weighting, no log term)
+                mask = (depths > 0).float()
+                l1 = (out["depth"] - depths).abs()
+                val_depth_l1 += (mask * l1).sum().item() / mask.sum().clamp(min=1).item()
 
-        # ── depth visualisation ───────────────────────────────────────────
-        if vis_batch is not None:
-            _save_depth_vis(vis_batch, out_dir / f"depth_epoch{epoch:03d}.png")
+                if i in vis_batch_indices:
+                    name = vis_batch_indices[i]
+                    vis_batches[name] = (images.cpu(), depths.cpu(), out["depth"].cpu())
+
+        val_loss      /= len(val_loader)
+        val_depth_l1  /= len(val_loader)
+        writer.add_scalar("val/loss",      val_loss,     epoch)
+        writer.add_scalar("val/depth_l1",  val_depth_l1, epoch)
+        print(f"Epoch {epoch:3d} — val_loss {val_loss:.4f}  depth_l1 {val_depth_l1:.4f} m  [{time.time()-t0:.0f}s]")
+
+        # ── depth visualisation (one row per dataset) ─────────────────────
+        if vis_batches:
+            rows = []
+            for name in ds_names:
+                if name in vis_batches:
+                    rows.append((name, *vis_batches[name]))
+            _save_depth_vis_grid(rows, out_dir / f"depth_epoch{epoch:03d}.png")
 
         # ── checkpoint ────────────────────────────────────────────────────
         torch.save({
@@ -247,13 +275,13 @@ def train(args):
             "model":       model.state_dict(),
             "opt":         opt.state_dict(),
             "scheduler":   scheduler.state_dict(),
-            "val_loss":    val_loss,
+            "val_loss":    val_depth_l1,   # track depth_l1 for resume comparisons
         }, out_dir / "last.pt")
 
-        if val_loss < best_val:
-            best_val = val_loss
+        if val_depth_l1 < best_val:
+            best_val = val_depth_l1
             torch.save(model.state_dict(), out_dir / "best.pt")
-            print(f"  new best: {best_val:.4f}")
+            print(f"  new best depth_l1: {best_val:.4f} m")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

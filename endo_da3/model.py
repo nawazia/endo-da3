@@ -148,6 +148,69 @@ class EndoDA3(nn.Module):
         print("EndoDA3 fully loaded.")
         return model.eval().to(device)
 
+    @classmethod
+    def from_finetuned(
+        cls,
+        gastronet_path: str,
+        weights_path: str,
+        img_size: int = 336,
+        lora_rank: int = 4,
+        lora_alpha: float = 4.0,
+        with_camera: bool = False,
+        device: str = "cuda",
+    ) -> "EndoDA3":
+        """
+        Load a fully fine-tuned Endo-DA3 model for inference.
+
+        Requires the GastroNet backbone checkpoint (access-restricted, obtain
+        separately) and the Endo-DA3 weights file (head + LoRA, no backbone).
+
+        Args:
+            gastronet_path : Path to GastroNet dinov2.pth
+            weights_path   : Path to Endo-DA3 weights (e.g. endo_da3_weights.pt)
+            img_size       : Input image size (must match training, default 336)
+            lora_rank      : LoRA rank used during training (default 4)
+            lora_alpha     : LoRA alpha used during training (default 4.0)
+            with_camera    : Whether to load camera enc/dec (default False)
+            device         : Target device (default 'cuda')
+
+        Example::
+
+            model = EndoDA3.from_finetuned(
+                gastronet_path='path/to/gastronet/dinov2.pth',
+                weights_path='endo_da3_weights.pt',
+            ).eval()
+        """
+        import torch
+        from endo_da3.lora import inject_lora
+
+        # 1. Build with DA3-BASE head weights
+        model = cls.from_pretrained(img_size=img_size, with_camera=with_camera,
+                                    device="cpu")
+
+        # 2. Inject LoRA adapters (must match training config)
+        inject_lora(model, rank=lora_rank, lora_alpha=lora_alpha)
+
+        # 3. Replace backbone with GastroNet weights
+        ckpt = torch.load(gastronet_path, map_location="cpu")
+        gastro_sd = {k.replace("backbone.", ""): v
+                     for k, v in ckpt["teacher"].items()
+                     if k.startswith("backbone.")}
+        model.replace_backbone(gastro_sd)
+
+        # 4. Load trained head + LoRA weights (strict=False: backbone not included)
+        sd = torch.load(weights_path, map_location="cpu")
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        backbone_missing = [k for k in missing if k.startswith("backbone.")]
+        other_missing    = [k for k in missing if not k.startswith("backbone.")]
+        if other_missing:
+            print(f"  Warning — unexpected missing keys: {other_missing}")
+        if unexpected:
+            print(f"  Warning — unexpected keys: {unexpected}")
+        print(f"Endo-DA3 loaded ({len(backbone_missing)} backbone keys from GastroNet).")
+
+        return model.eval().to(device)
+
     def replace_backbone(self, dino_state_dict: dict) -> None:
         """
         Swap the DINOv2 weights in-place (e.g. load GastroNet weights),
