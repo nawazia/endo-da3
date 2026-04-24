@@ -1,16 +1,18 @@
 """
-Stage 3 — Structured-light GT depth fine-tuning on SCARED surgical keyframes.
+Stage 3 — SCARED surgical fine-tuning with keyframes + video pseudo-GT.
 
 Frozen   : GastroNet backbone base weights
 Trainable: LoRA adapters (rank-4), DualDPT head, camera_token, q_norm/k_norm
 
 Loss: full DA3 loss (LD + LM + LP + α·Lgrad)
-      Both cameras have structured-light GT depth → mask = depth > 0
+      Keyframes: structured-light GT for both cameras
+      Video frames: RAFT pseudo-GT for left camera only (right depth = 0)
 
 Data:
-    Train : SCARED dataset_1–7  (35 stereo keyframe pairs, ~8 batches/epoch)
-    Val   : SCARED dataset_8–9  (10 stereo pairs)
-    Eval  : SERV-CT per epoch   (AbsRel / δ<1.25 / RMSE) — primary metric for best.pt
+    Train : SCARED keyframes ds1-3,6-7 (25 pairs) +
+            SCARED video frames ds1-3,6-7 (~17,206 frames)
+    Val   : SCARED dataset_8–9 keyframes (10 pairs, structured-light GT)
+    Eval  : SERV-CT per epoch (AbsRel / δ<1.25 / RMSE) — primary metric for best.pt
 
 Initialisation: Stage 2a best.pt (GastroNet + LoRA already loaded)
 
@@ -116,13 +118,14 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model  = load_model(args, device)
 
-    train_loader, val_loader, ds_names = make_stage3_loaders(
+    train_loader, val_kf_loader, val_vid_loader, ds_names = make_stage3_loaders(
         scared_root=args.scared_root,
         img_size=args.img_size,
         batch_size=args.batch_size,
         num_workers=args.workers,
     )
-    print(f"Train: {len(train_loader)} batches/epoch  |  Val: {len(val_loader)} batches")
+    print(f"Train: {len(train_loader)} batches/epoch  |  "
+          f"Val keyframes: {len(val_kf_loader)}  |  Val video: {len(val_vid_loader)} batches")
 
     opt = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -187,59 +190,60 @@ def train(args):
             n_log       += 1
             global_step += 1
 
-        # log every epoch (small dataset — no point logging every N steps)
-        lr = scheduler.get_last_lr()[0]
-        if n_log == 0:
-            print(f"  epoch {epoch:3d}  all batches skipped (Inf/NaN)  lr {lr:.2e}  t {time.time()-t0:.0f}s")
-        else:
-            print(
-                f"  epoch {epoch:3d}  loss {running['total']/n_log:.4f}"
-                f"  LD {running['LD']/n_log:.3f}"
-                f"  LM {running['LM']/n_log:.3f}"
-                f"  LP {running['LP']/n_log:.3f}"
-                f"  Lg {running['Lgrad']/n_log:.3f}"
-                f"  lr {lr:.2e}  t {time.time()-t0:.0f}s"
-            )
-            writer.add_scalars("train", {k: running[k]/n_log for k in running}, global_step)
-        writer.add_scalar("lr", lr, global_step)
-
-        # ── val (SCARED dataset_8–9) ───────────────────────────────────────
-        model.eval()
-        val_loss     = 0.0
-        val_depth_l1 = 0.0
-        vis_batch    = None
-
-        with torch.no_grad():
-            for i, batch in enumerate(val_loader):
-                images = batch["images"].to(device)
-                depths = batch["depths"].to(device)
-                c2w    = batch["c2w"].to(device)
-                K      = batch["K"].to(device)
-                out    = model(images)
-
-                loss, _ = da3_loss(out, depths, c2w, K, alpha=args.alpha)
-                val_loss += loss.item()
-
-                mask = (depths > 0).float()
-                l1   = (out["depth"] - depths).abs()
-                val_depth_l1 += (
-                    (mask * l1).sum().item() / mask.sum().clamp(min=1).item()
+            if (step + 1) % args.log_every == 0:
+                lr = scheduler.get_last_lr()[0]
+                print(
+                    f"  epoch {epoch:3d}  step {step+1:5d}/{len(train_loader)}"
+                    f"  loss {running['total']/max(n_log,1):.4f}"
+                    f"  LD {running['LD']/max(n_log,1):.3f}"
+                    f"  LM {running['LM']/max(n_log,1):.3f}"
+                    f"  LP {running['LP']/max(n_log,1):.3f}"
+                    f"  Lg {running['Lgrad']/max(n_log,1):.3f}"
+                    f"  lr {lr:.2e}  t {time.time()-t0:.0f}s"
                 )
+                writer.add_scalars("train", {k: running[k]/max(n_log,1) for k in running}, global_step)
+                writer.add_scalar("lr", lr, global_step)
+                running = {k: 0.0 for k in running}
+                n_log   = 0
 
-                if i == 0:
-                    vis_batch = (images.cpu(), depths.cpu(), out["depth"].cpu())
+        # ── val ───────────────────────────────────────────────────────────
+        model.eval()
+        vis_batch = None
 
-        val_loss     /= len(val_loader)
-        val_depth_l1 /= len(val_loader)
-        writer.add_scalar("val/loss",     val_loss,     epoch)
-        writer.add_scalar("val/depth_l1", val_depth_l1, epoch)
+        def _run_val(loader):
+            total_loss, total_l1, n = 0.0, 0.0, 0
+            with torch.no_grad():
+                for i, batch in enumerate(loader):
+                    images = batch["images"].to(device)
+                    depths = batch["depths"].to(device)
+                    c2w    = batch["c2w"].to(device)
+                    K      = batch["K"].to(device)
+                    out    = model(images)
+                    loss, _ = da3_loss(out, depths, c2w, K, alpha=args.alpha)
+                    total_loss += loss.item()
+                    mask = (depths > 0).float()
+                    l1   = (out["depth"] - depths).abs()
+                    total_l1 += (mask * l1).sum().item() / mask.sum().clamp(min=1).item()
+                    n += 1
+                    if i == 0:
+                        nonlocal vis_batch
+                        vis_batch = (images.cpu(), depths.cpu(), out["depth"].cpu())
+            return total_loss / max(n, 1), total_l1 / max(n, 1)
+
+        kf_loss,  kf_l1  = _run_val(val_kf_loader)
+        vid_loss, vid_l1 = _run_val(val_vid_loader)
+
+        writer.add_scalar("val_kf/loss",     kf_loss,  epoch)
+        writer.add_scalar("val_kf/depth_l1", kf_l1,    epoch)
+        writer.add_scalar("val_vid/loss",    vid_loss,  epoch)
+        writer.add_scalar("val_vid/depth_l1", vid_l1,  epoch)
 
         # ── SERV-CT eval ───────────────────────────────────────────────────
         serv_ct = serv_ct_evaluate(model, args.serv_ct_root, device=device)
         writer.add_scalars("serv_ct", serv_ct, epoch)
         print(
             f"Epoch {epoch:3d} — "
-            f"val_l1 {val_depth_l1*1000:.1f}mm  "
+            f"kf_l1 {kf_l1*1000:.1f}mm  vid_l1 {vid_l1*1000:.1f}mm  "
             f"SERV-CT AbsRel {serv_ct['AbsRel']:.4f}  "
             f"δ<1.25 {serv_ct['d1']:.4f}  "
             f"RMSE {serv_ct['RMSE']*1000:.1f}mm  "
@@ -253,13 +257,14 @@ def train(args):
 
         # ── checkpoints ────────────────────────────────────────────────────
         torch.save({
-            "epoch":       epoch,
-            "global_step": global_step,
-            "model":       model.state_dict(),
-            "opt":         opt.state_dict(),
-            "scheduler":   scheduler.state_dict(),
-            "serv_ct":     serv_ct,
-            "val_depth_l1": val_depth_l1,
+            "epoch":        epoch,
+            "global_step":  global_step,
+            "model":        model.state_dict(),
+            "opt":          opt.state_dict(),
+            "scheduler":    scheduler.state_dict(),
+            "serv_ct":      serv_ct,
+            "val_kf_l1":    kf_l1,
+            "val_vid_l1":   vid_l1,
         }, out_dir / "last.pt")
 
         if serv_ct["AbsRel"] < best_abs_rel:
@@ -285,6 +290,7 @@ def parse_args():
     p.add_argument("--lora-rank",     type=int,   default=4)
     p.add_argument("--lora-alpha",    type=float, default=4.0)
     p.add_argument("--workers",       type=int,   default=4)
+    p.add_argument("--log-every",     type=int,   default=50)
     return p.parse_args()
 
 

@@ -138,6 +138,7 @@ class StereoMISDataset(EndoDepthDataset):
 
         # Depth: pseudo-GT for left only, apply same resize+centercrop as image
         depth_np = np.load(self._depth_dir / f"{stem}.npy").astype(np.float32)
+        depth_np = np.nan_to_num(depth_np, nan=0.0, posinf=0.0, neginf=0.0)
         depth_t  = torch.from_numpy(depth_np).unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
         scale    = self.img_size / min(_ORIG_H, _ORIG_W)
         new_h    = round(_ORIG_H * scale)

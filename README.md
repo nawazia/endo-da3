@@ -195,8 +195,12 @@ EndoSLAM
   ├──────────────────────────────────────┼──────────────────────────┼────────────┤
   │ MiroCam + PillCam + other mono video │ Pose GT → photometric    │ Stage 2b   │
   ├──────────────────────────────────────┼──────────────────────────┼────────────┤
-  │ HighCam + LowCam + OlympusCam        │ CT/mesh → rendered depth │ Stage 3    │
+  │ HighCam + LowCam + OlympusCam        │ CT/mesh → rendered depth │ Stage 3  ✓ │
   └──────────────────────────────────────┴──────────────────────────┴────────────┘
+
+1. Investigate the growing artifact problem
+2. Implement VLoRA like: DARES: Depth Anything in Robotic Endoscopic Surgery with Self-Supervised Vector-LoRA
+3. Investigate unifying Depth Anything V2 (depth) and Reloc3rX (pose) like: Endo-FASt3r
 
 ## Acknowledgements
 

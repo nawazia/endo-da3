@@ -49,6 +49,9 @@ _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
 _IMAGENET_STD  = np.array([0.229, 0.224, 0.225])
 
 
+from torchvision import transforms as T
+
+
 def _to_colormap(depth: np.ndarray) -> np.ndarray:
     import matplotlib; matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -58,16 +61,75 @@ def _to_colormap(depth: np.ndarray) -> np.ndarray:
     return (plt.get_cmap("magma_r")(norm)[..., :3] * 255).astype(np.uint8)
 
 
-def _make_row(images, gt_depths, pred_depths) -> np.ndarray:
-    img  = images[0, 0].permute(1, 2, 0).numpy()
-    img  = ((img * _IMAGENET_STD + _IMAGENET_MEAN).clip(0, 1) * 255).astype(np.uint8)
-    gt   = _to_colormap(gt_depths[0, 0].numpy())
-    pred = _to_colormap(pred_depths[0, 0].numpy())
-    return np.concatenate([img, gt, pred], axis=1)
+def _img_tf(img_size):
+    return T.Compose([
+        T.Resize(img_size, interpolation=T.InterpolationMode.BICUBIC),
+        T.CenterCrop(img_size),
+        T.ToTensor(),
+        T.Normalize(mean=_IMAGENET_MEAN.tolist(), std=_IMAGENET_STD.tolist()),
+    ])
 
 
-def _save_vis(row: np.ndarray, path):
-    PILImage.fromarray(row).save(path)
+def _denorm(t):
+    img = t.permute(1, 2, 0).cpu().numpy()
+    return ((img * _IMAGENET_STD + _IMAGENET_MEAN).clip(0, 1) * 255).astype(np.uint8)
+
+
+@torch.no_grad()
+def _make_vis_grid(model, data_path, img_size, device) -> np.ndarray:
+    """Build a multi-row [Input | Pred depth] grid from fixed OOD + synth images."""
+    from endo_da3.data import (
+        SimCol3DDataset, C3VDDataset,
+        EndoSLAMSynthDataset, PolypSense3DVirtualDataset,
+    )
+    data = Path(data_path)
+    tf   = _img_tf(img_size)
+
+    blank = np.zeros((img_size, img_size, 3), dtype=np.uint8)
+
+    # Fixed OOD images (no GT depth)
+    sources = []  # (label, pil, gt_np_or_None)
+    for label, path in [
+        ("SOH",    data / "SOH/000.png"),
+        ("Kvasir", data / "kvasir-dataset-v2/normal-z-line/0be91a4e-be3d-4c06-92d7-6e0ee417f55a.jpg"),
+    ]:
+        if path.exists():
+            sources.append((label, PILImage.open(path).convert("RGB"), None))
+
+    # One sample from each synth dataset (with GT depth)
+    for label, cls, root in [
+        ("SimCol3D",     SimCol3DDataset,            data / "SimCol3D"),
+        ("C3VD",         C3VDDataset,                data / "C3VD"),
+        ("EndoSLAM",     EndoSLAMSynthDataset,        data / "EndoSLAM"),
+        ("PolypSense3D", PolypSense3DVirtualDataset,  data / "PolypSense3D"),
+    ]:
+        try:
+            ds     = cls(str(root), split="val", img_size=img_size, seq_len=1, with_pose=False)
+            sample = ds[0]
+            pil    = PILImage.fromarray(_denorm(sample["images"][0]))
+            gt     = sample["depths"][0].numpy()   # (H, W) metres
+            sources.append((label, pil, gt))
+        except Exception:
+            pass
+
+    if not sources:
+        return None
+
+    rows = []
+    for label, pil, gt in sources:
+        x    = tf(pil).unsqueeze(0).unsqueeze(0).to(device)
+        pred = model(x)["depth"].squeeze().cpu().float().numpy()
+        pil_sq  = np.array(pil.resize((img_size, img_size), PILImage.BICUBIC))
+        gt_rgb  = _to_colormap(gt) if gt is not None else blank
+        row  = np.concatenate([pil_sq, gt_rgb, _to_colormap(pred)], axis=1)
+        bar  = np.zeros((16, row.shape[1], 3), dtype=np.uint8)
+        rows.extend([bar, row])
+
+    return np.concatenate(rows, axis=0)
+
+
+def _save_vis(arr: np.ndarray, path):
+    PILImage.fromarray(arr).save(path)
 
 
 # ── model loading ──────────────────────────────────────────────────────────────
@@ -152,6 +214,13 @@ def train(args):
             opt.zero_grad(set_to_none=True)
             out  = model(images)
             loss, terms = da3_loss(out, depths, c2w, K, alpha=args.alpha)
+
+            if not torch.isfinite(loss):
+                print(f"  [skip] non-finite loss at step {global_step}: {loss.item()}")
+                scheduler.step()
+                global_step += 1
+                continue
+
             loss.backward()
             nn.utils.clip_grad_norm_(
                 [p for p in model.parameters() if p.requires_grad], 1.0
@@ -185,10 +254,9 @@ def train(args):
         model.eval()
         val_loss     = 0.0
         val_depth_l1 = 0.0
-        vis_batch    = None
 
         with torch.no_grad():
-            for i, batch in enumerate(val_loader):
+            for batch in val_loader:
                 images = batch["images"].to(device)
                 depths = batch["depths"].to(device)
                 c2w    = batch["c2w"].to(device)
@@ -204,18 +272,15 @@ def train(args):
                     (mask * l1).sum().item() / mask.sum().clamp(min=1).item()
                 )
 
-                if i == 0:
-                    vis_batch = (images.cpu(), depths.cpu(), out["depth"].cpu())
-
         val_loss     /= len(val_loader)
         val_depth_l1 /= len(val_loader)
         writer.add_scalar("val/loss",     val_loss,     epoch)
         writer.add_scalar("val/depth_l1", val_depth_l1, epoch)
         print(f"Epoch {epoch:3d} — val_loss {val_loss:.4f}  val_depth_l1 {val_depth_l1*1000:.1f}mm  [{time.time()-t0:.0f}s]")
 
-        if vis_batch:
-            row = _make_row(*vis_batch)
-            _save_vis(row, out_dir / f"depth_epoch{epoch:03d}.png")
+        grid = _make_vis_grid(model, args.data_path, args.img_size, device)
+        if grid is not None:
+            _save_vis(grid, out_dir / f"depth_epoch{epoch:03d}.png")
 
         torch.save({
             "epoch":        epoch,
@@ -240,6 +305,8 @@ def parse_args():
     p.add_argument("--gastronet",      required=True)
     p.add_argument("--hamlyn-root",    required=True)
     p.add_argument("--stereomis-root", required=True)
+    p.add_argument("--data-path",      default="/home/in4218/code/data",
+                   help="Root data dir for vis (SOH, Kvasir, synth datasets)")
     p.add_argument("--out-dir",        default="runs/stage2a")
     p.add_argument("--img-size",       type=int,   default=336)
     p.add_argument("--batch-size",     type=int,   default=6)

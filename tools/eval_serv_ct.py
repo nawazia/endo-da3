@@ -117,16 +117,18 @@ def compute_metrics(
     med_p = np.median(p)
     med_g = np.median(g)
     if med_p < 1e-6:
-        return {"AbsRel": float("nan"), "d1": float("nan"), "RMSE": float("nan")}
+        return {"AbsRel": float("nan"), "d1": float("nan"), "d2": float("nan"), "d3": float("nan"), "RMSE": float("nan")}
     s = med_g / med_p
     p = p * s
 
     abs_rel = float(np.mean(np.abs(p - g) / g))
     ratio   = np.maximum(p / g, g / p)
     d1      = float(np.mean(ratio < 1.25))
+    d3      = float(np.mean(ratio < 1.05))
+    mae     = float(np.mean(np.abs(p - g)))
     rmse    = float(np.sqrt(np.mean((p - g) ** 2)))
 
-    return {"AbsRel": abs_rel, "d1": d1, "RMSE": rmse}
+    return {"AbsRel": abs_rel, "d1": d1, "d3": d3, "MAE": mae, "RMSE": rmse}
 
 
 # ── inference + eval ──────────────────────────────────────────────────────────

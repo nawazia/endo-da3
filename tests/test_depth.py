@@ -30,6 +30,8 @@ SOH_PATH       = '/home/in4218/code/data/SOH/000.png'
 KVASIR_PATH    = '/home/in4218/code/data/kvasir-dataset-v2/normal-z-line/0be91a4e-be3d-4c06-92d7-6e0ee417f55a.jpg'
 HAMLYN_ROOT      = Path('/home/in4218/code/data/Hamlyn/daVinci')
 STEREOMIS_ROOT   = Path('/home/in4218/code/data/StereoMIS')
+SCARED_ROOT      = Path('/home/in4218/code/data/SCARED')
+POLYPSENSE3D_CLINICAL_ROOT = Path('/home/in4218/code/data/PolypSense3D')
 GASTRONET_CKPT = '/home/in4218/code/GastroNet/gastronet/dinov2.pth'
 STAGE1_CKPT    = '/home/in4218/code/endo-da3/runs/stage1/last.pt'
 STAGE2A_CKPT         = '/home/in4218/code/endo-da3/runs/stage2a/best.pt'
@@ -142,6 +144,25 @@ def pil_from_stereomis():
     return pil, gt
 
 
+def pil_from_scared():
+    """Returns (pil_image, gt_depth_tensor) from SCARED val split (dataset_8)."""
+    from endo_da3.data.scared import SCAREDDataset
+    ds = SCAREDDataset(SCARED_ROOT, train=False, img_size=IMG_SIZE)
+    sample = ds[0]
+    pil = Image.fromarray(denorm(sample['images'][0]))
+    gt  = sample['depths'][0]   # (H, W) structured-light GT, metres
+    return pil, gt
+
+
+def pil_from_polypsense3d_clinical():
+    """Returns (pil_image, None) from PolypSense3D clinical (no GT depth)."""
+    from endo_da3.data.polypsense3d_clinical import PolypSense3DClinicalDataset
+    ds = PolypSense3DClinicalDataset(POLYPSENSE3D_CLINICAL_ROOT, img_size=IMG_SIZE)
+    sample = ds[len(ds) // 2]
+    pil = Image.fromarray(denorm(sample['images'][0]))
+    return pil, None
+
+
 def main():
     from endo_da3 import EndoDA3
     from endo_da3.lora import inject_lora
@@ -199,19 +220,24 @@ def main():
     else:
         print(f"Stage 3 checkpoint not found ({STAGE3_CKPT}) — skipping column.")
 
+
     # ── Image sources — (label, pil, gt_or_None) ─────────────────────────────
     print("Loading images...")
-    hamlyn_pil, hamlyn_gt       = pil_from_hamlyn()
-    stereomis_pil, stereomis_gt = pil_from_stereomis()
+    hamlyn_pil, hamlyn_gt               = pil_from_hamlyn()
+    stereomis_pil, stereomis_gt         = pil_from_stereomis()
+    scared_pil, scared_gt               = pil_from_scared()
+    clinical_pil, clinical_gt           = pil_from_polypsense3d_clinical()
     sources = [
-        ('SOH (natural)',           Image.open(SOH_PATH).convert('RGB'),    None),
-        ('Kvasir (endo)',           Image.open(KVASIR_PATH).convert('RGB'), None),
-        ('Hamlyn (real surgery)',   hamlyn_pil,                             hamlyn_gt),
-        ('StereoMIS (porcine)',     stereomis_pil,                          stereomis_gt),
-        ('SimCol3D',                *pil_from_dataset(SimCol3DDataset,            DATA / 'SimCol3D')),
-        ('C3VD',                    *pil_from_dataset(C3VDDataset,                DATA / 'C3VD')),
-        ('EndoSLAM',                *pil_from_dataset(EndoSLAMSynthDataset,       DATA / 'EndoSLAM')),
-        ('PolypSense3D',            *pil_from_dataset(PolypSense3DVirtualDataset, DATA / 'PolypSense3D')),
+        ('SOH',                         Image.open(SOH_PATH).convert('RGB'),    None),
+        ('Kvasir',                      Image.open(KVASIR_PATH).convert('RGB'), None),
+        ('Hamlyn',                      hamlyn_pil,                             hamlyn_gt),
+        ('StereoMIS',                   stereomis_pil,                          stereomis_gt),
+        ('SCARED',                      scared_pil,                             scared_gt),
+        ('PolypSense3D (clinical)',       clinical_pil,                           clinical_gt),
+        ('SimCol3D',                    *pil_from_dataset(SimCol3DDataset,            DATA / 'SimCol3D')),
+        ('C3VD',                        *pil_from_dataset(C3VDDataset,                DATA / 'C3VD')),
+        ('EndoSLAM',                    *pil_from_dataset(EndoSLAMSynthDataset,       DATA / 'EndoSLAM')),
+        ('PolypSense3D (synth)',        *pil_from_dataset(PolypSense3DVirtualDataset, DATA / 'PolypSense3D')),
     ]
 
     # ── Inference ─────────────────────────────────────────────────────────────

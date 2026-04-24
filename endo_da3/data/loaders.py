@@ -90,19 +90,22 @@ def make_stage2a_loaders(
     """
     Build train and val DataLoaders for Stage 2a.
 
-    Train: Hamlyn daVinci (train split) + StereoMIS P1
+    Train: Hamlyn daVinci (train split) + StereoMIS P1 + StereoMIS P2_0–P2_8 + P3
     Val  : Hamlyn daVinci (val split, last 10% of test)
 
     Returns:
         train_loader, val_loader, dataset_names
     """
+    stereomis_seqs = ["P1", "P2_0", "P2_1", "P2_2", "P2_3", "P2_4",
+                      "P2_5", "P2_6", "P2_7", "P2_8"]  # P3 held out as test
     train_datasets = [
-        HamlynDataset(hamlyn_root,    split="train", img_size=img_size),
-        StereoMISDataset(stereomis_root, seq="P1",   img_size=img_size),
+        HamlynDataset(hamlyn_root, split="train", img_size=img_size),
+        *[StereoMISDataset(stereomis_root, seq=seq, img_size=img_size)
+          for seq in stereomis_seqs],
     ]
     val_ds = HamlynDataset(hamlyn_root, split="val", img_size=img_size)
 
-    names = [type(ds).__name__ for ds in train_datasets]
+    names = ["HamlynDataset", "StereoMISDataset (P1+P2, P3=test)"]
 
     train_loader = DataLoader(
         ConcatDataset(train_datasets),
@@ -179,29 +182,36 @@ def make_stage3_loaders(
     """
     Build train and val DataLoaders for Stage 3.
 
-    Train: SCARED dataset_1–7 (35 keyframe stereo pairs)
-    Val  : SCARED dataset_8–9 (10 keyframe stereo pairs)
-
-    Each sample: stereo pair with structured-light GT depth for both cameras.
+    Train: SCARED keyframes (25) + SCARED video frames (17,206)
+    Val  : SCARED dataset_8–9 keyframes (10 pairs, structured-light GT)
 
     Returns:
         train_loader, val_loader, dataset_names
     """
-    train_ds = SCAREDDataset(scared_root, train=True,  img_size=img_size)
-    val_ds   = SCAREDDataset(scared_root, train=False, img_size=img_size)
+    train_kf  = SCAREDDataset(scared_root, train=True, video=False, img_size=img_size)
+    train_vid = SCAREDDataset(scared_root, train=True, video=True,  img_size=img_size)
+    val_kf  = SCAREDDataset(scared_root, train=False, video=False, img_size=img_size)
+    val_vid = SCAREDDataset(scared_root, train=False, video=True,  img_size=img_size)
+
+    names = ["SCAREDDataset (keyframes)", "SCAREDDataset (video)"]
 
     train_loader = DataLoader(
-        train_ds,
+        ConcatDataset([train_kf, train_vid]),
         batch_size=batch_size, shuffle=True,
         num_workers=num_workers, pin_memory=True, drop_last=True,
     )
-    val_loader = DataLoader(
-        val_ds,
+    val_kf_loader = DataLoader(
+        val_kf,
+        batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=True,
+    )
+    val_vid_loader = DataLoader(
+        val_vid,
         batch_size=batch_size, shuffle=False,
         num_workers=num_workers, pin_memory=True,
     )
 
-    return train_loader, val_loader, [train_ds.name]
+    return train_loader, val_kf_loader, val_vid_loader, names
 
 
 def make_stage2b_distill_loaders(
